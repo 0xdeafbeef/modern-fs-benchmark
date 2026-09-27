@@ -25,6 +25,7 @@ RUN_BENCH = ROOT / "scripts" / "run-bench.sh"
 SUMMARIZE = ROOT / "scripts" / "summarize.sh"
 MANAGED_HARDWARE_RUNNER = ROOT / "scripts" / "managed-hardware-runner.sh"
 XFS_BACKEND = ROOT / "scripts" / "fs" / "xfs.sh"
+EXT4_BACKEND = ROOT / "scripts" / "fs" / "ext4.sh"
 ZFS_BACKEND = ROOT / "scripts" / "fs" / "zfs.sh"
 BCACHEFS_BACKEND = ROOT / "scripts" / "fs" / "bcachefs.sh"
 BCACHEFS_DEBUG = ROOT / "scripts" / "lib" / "bcachefs-debug.sh"
@@ -1902,6 +1903,11 @@ class BackendConfigurationTests(unittest.TestCase):
         self.assertIn("-o refreservation=none", source)
         self.assertIn("zvol_resolve_device", source)
         self.assertIn('name=$(zvol_id "$candidate"', source)
+
+    def test_ext4_initializes_inode_tables_at_mkfs(self):
+        source = EXT4_BACKEND.read_text()
+
+        self.assertIn("-E lazy_itable_init=0,lazy_journal_init=0", source)
 
     def test_bcachefs_ec_evacuation_is_bounded_and_diagnostic(self):
         backend = BCACHEFS_BACKEND.read_text()

@@ -19,7 +19,11 @@ fs_setup() {
       LAYERED_DEV=$LUKS_TOP_DEV
       ;;
   esac
-  mkfs.ext4 -Fq "$LAYERED_DEV"
+  # Initialize inode tables and the journal at mkfs: with lazy_itable_init
+  # the ext4lazyinit thread zeroes the inode tables in the background after
+  # mount (~256M on a 16G device), inflating the first measured phases' time
+  # and I/O.
+  mkfs.ext4 -Fq -E lazy_itable_init=0,lazy_journal_init=0 "$LAYERED_DEV"
   mount -t ext4 -o noatime "$LAYERED_DEV" "$MNT"
   if declare -F benchmark_mount_started >/dev/null; then
     benchmark_mount_started
