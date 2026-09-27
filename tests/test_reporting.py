@@ -19,6 +19,7 @@ AUDIT = ROOT / "scripts" / "audit-results.py"
 SCHEMA = ROOT / "scripts" / "result-schema.json"
 VALIDATOR = ROOT / "scripts" / "validate-result.py"
 BLOCK_QUEUE_PROVENANCE = ROOT / "scripts" / "block-queue-provenance.py"
+BLOCK_IO_COUNTERS = ROOT / "scripts" / "block-io-counters.py"
 TIER_PLACEMENT_VALIDATOR = ROOT / "scripts" / "verify-bcachefs-tier-placement.py"
 RUN_BENCH = ROOT / "scripts" / "run-bench.sh"
 SUMMARIZE = ROOT / "scripts" / "summarize.sh"
@@ -916,6 +917,89 @@ class ResultSchemaTests(unittest.TestCase):
                 },
             ],
         )
+
+    def test_block_io_counters_keep_partitions_as_leaves(self):
+        def stat_line(read_ios, read_sectors, write_ios, write_sectors, discard=None):
+            fields = [read_ios, 0, read_sectors, 0, write_ios, 0, write_sectors, 0, 0, 0, 0]
+            if discard is not None:
+                fields += [discard[0], 0, discard[1], 0, 0, 0]
+            return " ".join(map(str, fields)) + "\n"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sysfs = root / "class" / "block"
+            devices = root / "devices"
+            sysfs.mkdir(parents=True)
+
+            disk = devices / "sda"
+            disk.mkdir(parents=True)
+            (disk / "dev").write_text("8:0\n")
+            (disk / "stat").write_text(stat_line(900, 900, 900, 900, (9, 9)))
+            (sysfs / "sda").symlink_to(disk, target_is_directory=True)
+            for number in (1, 2):
+                partition = disk / f"sda{number}"
+                partition.mkdir()
+                (partition / "partition").write_text(f"{number}\n")
+                (partition / "dev").write_text(f"8:{number}\n")
+                (partition / "stat").write_text(stat_line(1, 2, 3, 4, (0, 0)))
+                (sysfs / f"sda{number}").symlink_to(
+                    partition, target_is_directory=True
+                )
+
+            loop = devices / "loop7"
+            loop.mkdir()
+            (loop / "dev").write_text("7:7\n")
+            (loop / "stat").write_text(stat_line(10, 20, 30, 40))
+            (sysfs / "loop7").symlink_to(loop, target_is_directory=True)
+
+            dm = devices / "dm-0"
+            (dm / "slaves").mkdir(parents=True)
+            (dm / "dev").write_text("253:0\n")
+            (dm / "stat").write_text(stat_line(500, 500, 500, 500, (5, 5)))
+            (dm / "slaves" / "sda1").symlink_to(sysfs / "sda1")
+            (sysfs / "dm-0").symlink_to(dm, target_is_directory=True)
+
+            roots = ("/dev/dm-0", "/dev/sda1", "/dev/sda2", "/dev/loop7")
+            before = run_script(BLOCK_IO_COUNTERS, "--sysfs-root", sysfs, "snapshot", *roots)
+            self.assertEqual(before.returncode, 0, before.stderr)
+            self.assertEqual(
+                sorted(entry["device"] for entry in json.loads(before.stdout).values()),
+                ["/dev/loop7", "/dev/sda1", "/dev/sda2"],
+            )
+
+            (disk / "sda1" / "stat").write_text(stat_line(2, 10, 5, 12, (1, 8)))
+            (disk / "stat").write_text(stat_line(9999, 9999, 9999, 9999, (99, 99)))
+            (loop / "stat").write_text(stat_line(10, 20, 31, 48))
+            delta = run_script(
+                BLOCK_IO_COUNTERS, "--sysfs-root", sysfs, "delta", before.stdout, *roots
+            )
+            self.assertEqual(delta.returncode, 0, delta.stderr)
+            document = json.loads(delta.stdout)
+            self.assertEqual(
+                document["total"],
+                {
+                    "read_ios": 1, "read_bytes": 8 * 512,
+                    "write_ios": 3, "write_bytes": 16 * 512,
+                    "discard_ios": None, "discard_bytes": None,
+                },
+            )
+            leaves = {leaf["device"]: leaf for leaf in document["leaves"]}
+            self.assertEqual(leaves["/dev/sda1"]["discard_bytes"], 8 * 512)
+            self.assertEqual(leaves["/dev/sda2"]["write_bytes"], 0)
+
+            (loop / "stat").write_text(stat_line(10, 20, 29, 40))
+            decreased = run_script(
+                BLOCK_IO_COUNTERS, "--sysfs-root", sysfs, "delta", before.stdout, *roots
+            )
+            self.assertNotEqual(decreased.returncode, 0)
+            self.assertIn("/dev/loop7: write_ios decreased", decreased.stderr)
+
+            (sysfs / "loop7").unlink()
+            vanished = run_script(
+                BLOCK_IO_COUNTERS, "--sysfs-root", sysfs, "delta", before.stdout, *roots
+            )
+            self.assertNotEqual(vanished.returncode, 0)
+            self.assertIn("leaf devices changed inside the window", vanished.stderr)
 
     def test_scenario_and_topology_are_optional_nonempty_strings(self):
         schema = json.loads(SCHEMA.read_text())
