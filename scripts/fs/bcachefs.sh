@@ -181,6 +181,22 @@ fs_teardown() {
   umount "$MNT" 2>/dev/null || true
 }
 
+# sync(2) reaches bch2_sync_fs(), which only flushes the journal; btree node,
+# key-cache and write-buffer updates stay pinned in it and journal reclaim
+# writes them back lazily. trigger_journal_flush waits until every
+# outstanding journal pin is flushed, and a btree node's pin is dropped only
+# once its write completes. The filesystem's sysfs directory is found
+# through the "bcachefs" link the module puts on each member block device.
+# Reconcile (EC striping, background moves) keeps running after the barrier.
+fs_io_barrier() {
+  local member trigger
+  sync
+  member=$(readlink -f "${DEVICES[0]}")
+  trigger=$(readlink -f "/sys/class/block/${member##*/}/bcachefs/..")/internal/trigger_journal_flush
+  [ -w "$trigger" ] || die "bcachefs journal flush trigger not found: $trigger"
+  echo 1 > "$trigger" || die "bcachefs journal flush failed"
+}
+
 fs_scrub() {
   # scrub may exit non-zero after *finding* errors — that's still a
   # completed scrub; only treat CLI-level failure as unsupported

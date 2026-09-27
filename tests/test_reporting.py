@@ -98,6 +98,71 @@ METRIC_CONTRACT = [
     ("snapscale_delete_ms", "Delete 500 snapshots", "ms", "lower"),
 ]
 
+BLOCK_IO_METRIC_CONTRACT = [
+    ("seqwrite_write_amp", "Sequential write amplification", "x", "lower"),
+    ("randwrite_write_amp", "Random write amplification, 4k + fsync", "x", "lower"),
+    ("randwrite4_write_amp", "Random write amplification, 4 threads", "x", "lower"),
+    ("randread_read_amp", "Random read amplification, 4k cold cache", "x", "lower"),
+    ("randread4_read_amp", "Random read amplification, 4 threads", "x", "lower"),
+    ("seqread_read_amp", "Sequential read amplification", "x", "lower"),
+    (
+        "smalltree_create_write_amp",
+        "Write amplification, create 20k-file tree",
+        "x",
+        "lower",
+    ),
+    (
+        "smalltree_cp_write_amp",
+        "Write amplification, cp -r 20k-file tree",
+        "x",
+        "lower",
+    ),
+    ("aging_write_amp", "Write amplification under snapshot aging", "x", "lower"),
+    ("compress_write_amp", "Write amplification, compressible data", "x", "lower"),
+    (
+        "divergence_plain_write_amp",
+        "Write amplification, overwrite plain file",
+        "x",
+        "lower",
+    ),
+    (
+        "divergence_clone_write_amp",
+        "Write amplification, overwrite fresh reflink clone",
+        "x",
+        "lower",
+    ),
+    (
+        "divergence_snap_write_amp",
+        "Write amplification, overwrite freshly-snapshotted file",
+        "x",
+        "lower",
+    ),
+    (
+        "largedir_create_bytes_per_file",
+        "Bytes written per file, create in 100k directory",
+        "B/file",
+        "lower",
+    ),
+    (
+        "largedir_delete_bytes_per_file",
+        "Bytes written per file, delete 100k directory",
+        "B/file",
+        "lower",
+    ),
+    (
+        "smalltree_rm_bytes_per_file",
+        "Bytes written per file, rm -rf 20k-file tree",
+        "B/file",
+        "lower",
+    ),
+    (
+        "snapscale_create_bytes_per_snapshot",
+        "Bytes written per snapshot create",
+        "B/snapshot",
+        "lower",
+    ),
+]
+
 HARDWARE_METRIC_CONTRACT = [
     ("randwrite8_iops", "Random write, 8 workers", "IOPS", "higher"),
     ("randwrite16_iops", "Random write, 16 workers", "IOPS", "higher"),
@@ -217,8 +282,11 @@ class DashboardRegressionTests(unittest.TestCase):
             [
                 {"key": key, "label": label, "unit": unit, "better": better}
                 for key, label, unit, better in METRIC_CONTRACT
+                + BLOCK_IO_METRIC_CONTRACT
             ],
         )
+        for key, _label, _unit, _better in BLOCK_IO_METRIC_CONTRACT:
+            self.assertIn("block-io-counters.py", str(data["docs"][key]["src"]))
         latest = data["latest"]["results"]
         self.assertEqual(latest["ext4/single"]["seqwrite_mbps"], 510.2)
         self.assertEqual(latest["btrfs/raid1"]["aging_mbps"], [42.0, 39.5, 37.0])
@@ -819,8 +887,9 @@ class ResultSchemaTests(unittest.TestCase):
             if metric[0] == "rebuild_s"
         ) + 1
         expected_cards[failure_index:failure_index] = FAILURE_DOMAIN_CARD_METRIC_CONTRACT
+        expected_cards += BLOCK_IO_METRIC_CONTRACT
 
-        self.assertEqual(schema["schema_version"], 6)
+        self.assertEqual(schema["schema_version"], 7)
         self.assertEqual(
             [
                 (metric["key"], metric["label"], metric["unit"], metric["better"])
@@ -845,7 +914,9 @@ class ResultSchemaTests(unittest.TestCase):
         score_model = dashboard[
             dashboard.index("const SCORE_MODEL") : dashboard.index("const scoreMetric")
         ]
-        for key, _label, _unit, _better in HARDWARE_METRIC_CONTRACT:
+        for key, _label, _unit, _better in (
+            HARDWARE_METRIC_CONTRACT + BLOCK_IO_METRIC_CONTRACT
+        ):
             self.assertNotIn(key, score_model)
 
     def test_block_queue_provenance_resolves_stacked_devices(self):
@@ -1703,12 +1774,64 @@ phase_sparse_files
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(event_text, "sync\n")
 
+    def test_block_io_window_brackets_the_workload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = r"""
+DATA=$2
+SEQ_SIZE=2G
+log() { :; }
+block_io_begin() { printf 'begin\n' >> "$DATA/events"; }
+block_io_end() {
+  printf 'end %s\n' "$1" >> "$DATA/events"
+  BLOCK_IO_READ_BYTES=0
+  BLOCK_IO_WRITE_BYTES=4096
+}
+fio_json() {
+  printf 'fio\n' >> "$DATA/events"
+  printf '%s\n' '{"jobs":[{"write":{"bw_bytes":1048576,"io_bytes":2048}}]}' \
+    > "$DATA/fio.json"
+  printf '%s\n' "$DATA/fio.json"
+}
+phase_sequential_write
+printf '%s\n' "$SEQWRITE_WRITE_AMP"
+"""
+            result = run_benchmark_shell(source, tmp)
+            events = (Path(tmp) / "events").read_text().splitlines()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "2")
+        self.assertEqual(events, ["begin", "fio", "end seqwrite"])
+
+    def test_block_io_window_opens_after_a_sync_barrier(self):
+        result = run_benchmark_shell(
+            r"""
+BLOCK_IO_ROOTS=(/dev/fake)
+sync() { printf 'sync\n' >&2; }
+python3() { printf 'python3 %s\n' "${*:2}" >&2; printf '{}\n'; }
+block_io_begin
+"""
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stderr.splitlines(), ["sync", "python3 snapshot /dev/fake"]
+        )
+
+    def test_block_io_ratio_rejects_zero_denominator(self):
+        result = run_benchmark_shell("block_io_ratio 4096 0\n")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("positive denominator", result.stderr)
+
     def test_sequential_write_phase_can_run_with_stubs(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = r'''
 DATA=$2
 SEQ_SIZE=2G
 log() { :; }
+block_io_begin() { :; }
+block_io_end() { BLOCK_IO_READ_BYTES=0; BLOCK_IO_WRITE_BYTES=0; }
+block_io_ratio() { printf '1\n'; }
 fio_json() {
   printf '%s\n' "$*" > "$DATA/fio-call"
   printf '%s\n' "$DATA/fio.json"
@@ -1735,6 +1858,9 @@ DATA=$2
 RUNTIME=30
 BENCH_DEVICES=
 log() { :; }
+block_io_begin() { :; }
+block_io_end() { BLOCK_IO_READ_BYTES=0; BLOCK_IO_WRITE_BYTES=0; }
+block_io_ratio() { printf '1\n'; }
 fio_json() {
   printf '%s\n' "$*" >> "$DATA/fio-calls"
   printf '%s\n' "$DATA/fio.json"
@@ -1763,6 +1889,9 @@ RUNTIME=30
 BENCH_DEVICES=/dev/fake
 BENCH_HARDWARE_RANDOM_SCALING=1
 log() { :; }
+block_io_begin() { :; }
+block_io_end() { BLOCK_IO_READ_BYTES=0; BLOCK_IO_WRITE_BYTES=0; }
+block_io_ratio() { printf '1\n'; }
 rm() { printf 'rm\n' >> "$DATA/events"; }
 sync() { printf 'sync\n' >> "$DATA/events"; }
 fio_json() {
@@ -1823,6 +1952,9 @@ BENCH_DEVICES=/dev/fake
 BENCH_HARDWARE_RANDOM_SCALING=1
 cache_drops=0
 log() { :; }
+block_io_begin() { :; }
+block_io_end() { BLOCK_IO_READ_BYTES=0; BLOCK_IO_WRITE_BYTES=0; }
+block_io_ratio() { printf '1\n'; }
 fio() { :; }
 fs_drop_caches() { cache_drops=$((cache_drops + 1)); }
 fio_json() {
@@ -1867,6 +1999,9 @@ DATA=$2
 LARGEDIR_FILES=3
 cache_drops=0
 log() { :; }
+block_io_begin() { :; }
+block_io_end() { BLOCK_IO_READ_BYTES=0; BLOCK_IO_WRITE_BYTES=0; }
+block_io_ratio() { printf '1\n'; }
 sync() { :; }
 now_ms() { printf '1\n'; }
 fs_drop_caches() { cache_drops=$((cache_drops + 1)); }
@@ -1892,6 +2027,65 @@ printf '%s %s %s %s %s %s %s\n' \
 
 
 class BackendConfigurationTests(unittest.TestCase):
+    def test_io_barrier_per_backend(self):
+        cases = (
+            ("zfs", "single", ["sync", "zpool sync fsbench"]),
+            ("xfs", "single", ["sync", "fsfreeze -f /mnt/x", "fsfreeze -u /mnt/x"]),
+            (
+                "xfs",
+                "zvol",
+                ["sync", "fsfreeze -f /mnt/x", "fsfreeze -u /mnt/x", "zpool sync fsbench"],
+            ),
+            ("btrfs", "raid1", ["sync"]),
+        )
+        for fs, layout, expected in cases:
+            with self.subTest(fs=fs, layout=layout):
+                result = run_benchmark_shell(
+                    r"""
+source "$SCRIPT_DIR/fs/$2.sh"
+LAYOUT=$3
+MNT=/mnt/x
+sync() { printf 'sync\n'; }
+zpool() { printf 'zpool %s\n' "$*"; }
+fsfreeze() { printf 'fsfreeze %s\n' "$*"; }
+fs_io_barrier
+""",
+                    fs,
+                    layout,
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), expected)
+
+    def test_bcachefs_io_barrier_flushes_journal_pins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fsdir = Path(tmp) / "fs"
+            (fsdir / "internal").mkdir(parents=True)
+            trigger = fsdir / "internal" / "trigger_journal_flush"
+            trigger.write_text("")
+            result = run_benchmark_shell(
+                r"""
+source "$SCRIPT_DIR/fs/bcachefs.sh"
+DEVICES=(/dev/disk/by-partlabel/member0)
+sync() { printf 'sync\n'; }
+readlink() {
+  case "$2" in
+    /dev/*) printf '/dev/sdb3\n' ;;
+    /sys/class/block/sdb3/bcachefs/..) printf '%s\n' "$FAKE_FS" ;;
+    *) return 1 ;;
+  esac
+}
+FAKE_FS=$2
+fs_io_barrier
+""",
+                fsdir,
+            )
+            written = trigger.read_text()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "sync\n")
+        self.assertEqual(written, "1\n")
+
     def test_zfs_enables_block_cloning_for_new_pools(self):
         source = ZFS_BACKEND.read_text()
 
