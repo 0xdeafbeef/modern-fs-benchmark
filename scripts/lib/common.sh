@@ -59,9 +59,8 @@ fs_drop_caches() {
 
 # Barrier around block I/O accounting windows: return once the filesystem's
 # own writes for everything done so far have reached the member devices.
-# Plain sync(2) is enough where the filesystem also writes its changes in
-# place during sync (ext4, btrfs); backends whose sync only commits a log
-# override this.
+# Every backend overrides this; plain sync(2) leaves each of them with some
+# deferred writeback or background cleanup (see the backend's barrier).
 fs_io_barrier() {
   sync
 }

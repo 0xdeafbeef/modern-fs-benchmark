@@ -73,9 +73,10 @@ BLOCK_IO_BASIS = (
     "(/sys/class/block/*/stat) summed over the benchmark's member devices below any "
     "md/LVM/LUKS/dm-integrity layer: loop devices in CI, the configured partitions or "
     "disks on hardware. The window opens and closes with a write barrier "
-    "outside the phase timers: sync, plus zpool sync on ZFS, a freeze/thaw on XFS and "
-    "a journal-pin flush on bcachefs, because on those sync only commits the log and "
-    "in-place writeback follows later. Work that filesystems schedule on their own "
+    "outside the phase timers. It waits for the writes sync leaves for later: "
+    "a freeze/thaw on ext4 and XFS, zpool sync plus the frees of destroyed snapshots "
+    "on ZFS, the cleanup of deleted subvolumes on btrfs, and snapshot deletion plus a "
+    "journal-pin flush on bcachefs. Work that filesystems schedule on their own "
     "(bcachefs reconcile, btrfs async discard, dm-cache and dm-integrity writeback) "
     "can still land in a later window. "
     "Per-device deltas, I/O counts and discards: raw/<config>-block-io.jsonl. ")

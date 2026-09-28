@@ -213,6 +213,8 @@ fs_io_barrier() {
   fsfreeze -u "$MNT" || die "failed to thaw $MNT after the I/O barrier"
   if zvol_case; then
     zpool sync "$ZPOOL"
+    zpool wait -t free "$ZPOOL"
+    zpool sync "$ZPOOL"
   fi
 }
 

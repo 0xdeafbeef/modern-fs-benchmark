@@ -2029,14 +2029,26 @@ printf '%s %s %s %s %s %s %s\n' \
 class BackendConfigurationTests(unittest.TestCase):
     def test_io_barrier_per_backend(self):
         cases = (
-            ("zfs", "single", ["sync", "zpool sync fsbench"]),
+            (
+                "zfs",
+                "single",
+                ["sync", "zpool sync fsbench", "zpool wait -t free fsbench", "zpool sync fsbench"],
+            ),
             ("xfs", "single", ["sync", "fsfreeze -f /mnt/x", "fsfreeze -u /mnt/x"]),
             (
                 "xfs",
                 "zvol",
-                ["sync", "fsfreeze -f /mnt/x", "fsfreeze -u /mnt/x", "zpool sync fsbench"],
+                [
+                    "sync",
+                    "fsfreeze -f /mnt/x",
+                    "fsfreeze -u /mnt/x",
+                    "zpool sync fsbench",
+                    "zpool wait -t free fsbench",
+                    "zpool sync fsbench",
+                ],
             ),
-            ("btrfs", "raid1", ["sync"]),
+            ("ext4", "single", ["sync", "fsfreeze -f /mnt/x", "fsfreeze -u /mnt/x"]),
+            ("btrfs", "raid1", ["sync", "btrfs subvolume sync /mnt/x", "sync"]),
         )
         for fs, layout, expected in cases:
             with self.subTest(fs=fs, layout=layout):
@@ -2048,6 +2060,8 @@ MNT=/mnt/x
 sync() { printf 'sync\n'; }
 zpool() { printf 'zpool %s\n' "$*"; }
 fsfreeze() { printf 'fsfreeze %s\n' "$*"; }
+btrfs() { printf 'btrfs %s\n' "$*" >&3; }
+exec 3>&1
 fs_io_barrier
 """,
                     fs,
@@ -2057,12 +2071,14 @@ fs_io_barrier
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout.splitlines(), expected)
 
-    def test_bcachefs_io_barrier_flushes_journal_pins(self):
+    def test_bcachefs_io_barrier_deletes_dead_snapshots_then_flushes_journal(self):
         with tempfile.TemporaryDirectory() as tmp:
             fsdir = Path(tmp) / "fs"
             (fsdir / "internal").mkdir(parents=True)
-            trigger = fsdir / "internal" / "trigger_journal_flush"
-            trigger.write_text("")
+            delete = fsdir / "internal" / "trigger_delete_dead_snapshots"
+            flush = fsdir / "internal" / "trigger_journal_flush"
+            delete.write_text("")
+            flush.write_text("")
             result = run_benchmark_shell(
                 r"""
 source "$SCRIPT_DIR/fs/bcachefs.sh"
@@ -2080,11 +2096,11 @@ fs_io_barrier
 """,
                 fsdir,
             )
-            written = trigger.read_text()
+            written = (delete.read_text(), flush.read_text())
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "sync\n")
-        self.assertEqual(written, "1\n")
+        self.assertEqual(written, ("1\n", "1\n"))
 
     def test_zfs_enables_block_cloning_for_new_pools(self):
         source = ZFS_BACKEND.read_text()

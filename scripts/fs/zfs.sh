@@ -135,7 +135,13 @@ fs_drop_caches() {
 # sync(2) reaches zfs_sync(), which only commits the ZIL; the main-pool data
 # and metadata land with the next txg, up to zfs_txg_timeout later. zpool
 # sync waits for the open txg and the deferred-free txgs after it.
+# Blocks of a destroyed snapshot go to the pool's free list and are freed a
+# bounded amount per txg, so a large destroy spans many txgs; zpool wait -t
+# free waits until that list is empty, and the last zpool sync writes the
+# final txg of the frees.
 fs_io_barrier() {
   sync
+  zpool sync "$POOL"
+  zpool wait -t free "$POOL"
   zpool sync "$POOL"
 }

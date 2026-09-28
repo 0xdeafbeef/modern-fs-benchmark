@@ -50,3 +50,12 @@ fs_teardown() {
   layered_teardown
 }
 fs_version() { mke2fs -V 2>&1 | head -1; }
+
+# sync(2) commits the journal and writes the checkpointed metadata home, but
+# the journal superblock's tail moves only with a later commit, inside the
+# next window. Freezing flushes the journal and updates the tail now.
+fs_io_barrier() {
+  sync
+  fsfreeze -f "$MNT" || die "failed to freeze $MNT for the I/O barrier"
+  fsfreeze -u "$MNT" || die "failed to thaw $MNT after the I/O barrier"
+}
